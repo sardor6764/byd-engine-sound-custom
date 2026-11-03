@@ -1,0 +1,52 @@
+
+name: Build Engine Sound APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apps/engine-sound/**'
+      - 'apps/common/**'
+      - '.github/workflows/build-engine-sound.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android components
+        run: |
+          sdkmanager "platforms;android-29" "build-tools;34.0.0"
+
+      - name: Build Engine Sound
+        run: |
+          chmod +x apps/engine-sound/build.sh
+
+          cd apps/engine-sound
+
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-29/android.jar" \
+          AAPT2="$ANDROID_HOME/build-tools/34.0.0/aapt2" \
+          PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH" \
+          ./build.sh
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Engine-Sound-APK
+          path: apps/engine-sound/build/engine-sound.apk
+          if-no-files-found: error
