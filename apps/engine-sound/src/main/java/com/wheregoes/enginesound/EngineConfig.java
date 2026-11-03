@@ -9,5 +9,5 @@ final class EngineConfig {
     static final String KEY_AUTO = "auto_enabled";
     /** Preset the keeper restores. Follows whatever the user last picked. */
     static final String KEY_PRESET = "auto_preset";
-    static final int DEFAULT_PRESET = 3;
+    static final int DEFAULT_PRESET = 4;
 }

@@ -134,6 +134,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Block the keeper before it can tick while this Activity initializes
+        // and performs its one-time startup check/2 -> 4 sequence.
+        AutoKeepService.sStartupInProgress = true;
         setContentView(R.layout.activity_main);
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -211,6 +214,7 @@ public class MainActivity extends Activity {
             if (mgr == null) {
                 fail(getString(R.string.err_service_null));
                 refreshVehiclePanel();
+                AutoKeepService.sStartupInProgress = false;
                 return;
             }
             setIntMethod = mgr.getClass().getMethod("setInt", int.class, int.class, int.class);
@@ -219,6 +223,7 @@ public class MainActivity extends Activity {
             Log.e(TAG, "auto service unavailable", t);
             fail(getString(R.string.err_service, String.valueOf(t.getMessage())));
             refreshVehiclePanel();
+            AutoKeepService.sStartupInProgress = false;
             return;
         }
 
@@ -231,17 +236,25 @@ public class MainActivity extends Activity {
         if (hasSim == null) {
             fail(getString(R.string.sim_unreadable));
             refreshVehiclePanel();
+            AutoKeepService.sStartupInProgress = false;
             return;
         }
         if (hasSim != 2) {
             fail(getString(R.string.sim_unsupported, hasSim));
             refreshVehiclePanel();
+            AutoKeepService.sStartupInProgress = false;
             return;
         }
 
         runOnUiThread(() -> setControlsEnabled(true));
         ready = true;
-        applyStartupPreset();
+        try {
+            applyStartupPreset();
+        } finally {
+            // The keeper may resume only after the startup 2 -> 4 sequence
+            // (or the startup state check) has completely finished.
+            AutoKeepService.sStartupInProgress = false;
+        }
     }
 
     /**
