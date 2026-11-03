@@ -2,6 +2,7 @@ package com.wheregoes.enginesound;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
@@ -17,6 +18,7 @@ import android.widget.LinearLayout;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.wheregoes.byd.AutoStart;
 import com.wheregoes.byd.Vehicle;
 
 import java.lang.reflect.Method;
@@ -34,7 +36,7 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "EngineSound";
 
-    private static final String PREFS = "engine_sound_prefs";
+    private static final String PREFS = EngineConfig.PREFS;
     private static final String KEY_NAME_PREFIX = "preset_name_";
 
     private static final int D = 1002;
@@ -74,6 +76,15 @@ public class MainActivity extends Activity {
     private static final long CYCLE_DWELL_MS = 2500;
     /** Pause between a write and its readback; the MCU does not answer instantly. */
     private static final long SETTLE_MS = 120;
+    /** Pause after the enable sequence, before the first source-type write lands. */
+    private static final long WARMUP_SETTLE_MS = 2000;
+    /** Confirmed by ear to actually produce sound on this car -- used to wake the
+     *  audio path before switching to whatever the user really wants. */
+    private static final int WAKE_PRESET = 2;
+    /** Used only on the rare case the user's own target preset IS the wake preset. */
+    private static final int FALLBACK_WAKE_PRESET = 1;
+    /** Preset to restore once when the app itself starts. */
+    private static final int STARTUP_PRESET = 4;
 
     private Object mgr;
     private Method setIntMethod;
@@ -97,6 +108,13 @@ public class MainActivity extends Activity {
 
     /** Written on the main thread, read on the io thread. */
     private volatile int pendingType = 1;
+    /**
+     * False right after the simulator is switched on. The audio path is not awake
+     * yet at that instant, so the first source-type write this power-on -- whichever
+     * code path it comes from (the enable sequence, a preset chip, NEXT/PREV, or
+     * Cycle) -- is primed instead of written plain. Cleared again on disableSim().
+     */
+    private volatile boolean audioWarmedUp = false;
     private volatile boolean cycling = false;
     private volatile boolean ready = false;
     private boolean simOn = false;
@@ -119,6 +137,14 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        // This build is configured to start on preset 4. The MCU needs preset 2
+        // first to wake the audio path, so initVehicle() applies 2 -> 4 once
+        // when the app starts and the simulator is already enabled.
+        pendingType = STARTUP_PRESET;
+        prefs.edit().putInt(EngineConfig.KEY_PRESET, STARTUP_PRESET).apply();
+        if (prefs.getBoolean(EngineConfig.KEY_AUTO, false)) {
+            startForegroundService(new Intent(this, AutoKeepService.class));
+        }
 
         typeLabel = findViewById(R.id.type_label);
         presetName = findViewById(R.id.preset_name);
@@ -153,6 +179,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        AutoKeepService.sUiActive = true;
         // First launch: initVehicle() does its own refresh once it is connected.
         if (ready) {
             io.post(this::readVehicleState);
@@ -162,6 +189,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        AutoKeepService.sUiActive = false;
         stopCycle();
     }
 
@@ -213,7 +241,52 @@ public class MainActivity extends Activity {
 
         runOnUiThread(() -> setControlsEnabled(true));
         ready = true;
-        readVehicleState();
+        applyStartupPreset();
+    }
+
+    /**
+     * Runs once per Activity process start, not on every simulator toggle.
+     * If the simulator is already on, explicitly wake the audio path with preset
+     * 2 and then apply preset 4. If it is off, leave it off; the normal enable
+     * path will perform the same 2 -> 4 sequence when the user turns it on.
+     */
+    private void applyStartupPreset() {
+        pendingType = STARTUP_PRESET;
+        Integer state = getInt(FID_STATE_GET);
+        if (state != null && state == 1) {
+            boolean writeOk = primeAndApply(STARTUP_PRESET);
+            audioWarmedUp = writeOk;
+            settle();
+            Integer back = getInt(FID_SRC_TYPE_GET);
+            Integer stateAfter = getInt(FID_STATE_GET);
+            lastWriteLine = "startup 2 -> 4 -> read "
+                    + (back == null ? "read failed" : back);
+            if (back != null && back == STARTUP_PRESET) {
+                prefs.edit().putInt(EngineConfig.KEY_PRESET, STARTUP_PRESET).apply();
+            }
+            final Integer actualType = back;
+            final boolean simStillOn = stateAfter != null && stateAfter == 1;
+            runOnUiThread(() -> {
+                if (actualType != null && actualType > 0) {
+                    pendingType = clamp(actualType);
+                }
+                renderPreset(pendingType);
+                syncToggle(simStillOn);
+                if (!writeOk || actualType == null || actualType != STARTUP_PRESET) {
+                    setStatus(getString(R.string.preset_rejected, STARTUP_PRESET,
+                            actualType == null ? 0 : actualType), R.color.warning);
+                } else if (!simStillOn) {
+                    setStatus(getString(R.string.sim_dropped, STARTUP_PRESET), R.color.warning);
+                } else {
+                    setStatus(getString(R.string.sim_on, STARTUP_PRESET), R.color.success);
+                }
+            });
+            refreshVehiclePanel();
+        } else {
+            // Do not turn the simulator on just because the app was opened.
+            audioWarmedUp = false;
+            readVehicleState();
+        }
     }
 
     /** The MCU needs a moment before a readback reflects the write. */
@@ -230,7 +303,7 @@ public class MainActivity extends Activity {
         Integer state = getInt(FID_STATE_GET);
         Integer src = getInt(FID_SRC_TYPE_GET);
         runOnUiThread(() -> {
-            if (src != null && src > 0) {
+            if (src != null && src > 0 && state != null && state == 1) {
                 pendingType = clamp(src);
             }
             renderPreset(pendingType);
@@ -279,12 +352,16 @@ public class MainActivity extends Activity {
 
     private void applyPendingNow() {
         final int want = pendingType;
-        if (!setInt(FID_SRC_TYPE_SET, want)) {
+        final boolean write = audioWarmedUp
+                ? setInt(FID_SRC_TYPE_SET, want)
+                : primeAndApply(want);
+        if (!write) {
             runOnUiThread(() ->
                     setStatus(getString(R.string.write_failed, want), R.color.danger));
             refreshVehiclePanel();
             return;
         }
+        audioWarmedUp = true;
         settle();
         Integer back = getInt(FID_SRC_TYPE_GET);
         lastWriteLine = "write 0x3E300038 = " + want + " -> read "
@@ -296,6 +373,9 @@ public class MainActivity extends Activity {
             return;
         }
         final int got = back;
+        if (got == want) {
+            prefs.edit().putInt(EngineConfig.KEY_PRESET, got).apply();
+        }
         // A car that stores the preset and then drops STATE back to 0 is what
         // "plays louder for a moment, then goes back to normal" looks like. The
         // status used to be rendered from the cached simOn flag, so the UI kept
@@ -334,26 +414,107 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            setInt(FID_SRC_TYPE_SET, pendingType);
-            settle();
+            // The audio engine is not awake the instant STATE_SET lands: a source-type
+            // write right here is stored by the MCU but does not reach the speaker (see
+            // primeAndApply). Warming up on a throwaway value first, then writing the
+            // real target, is what actually produces sound on the first try.
+            boolean presetOk = primeAndApply(pendingType);
+            audioWarmedUp = presetOk;
+            Integer actualType = getInt(FID_SRC_TYPE_GET);
             Integer state = getInt(FID_STATE_GET);
-            lastWriteLine = "write 0x3E300020 = 1 -> STATE "
-                    + (state == null ? "read failed" : state);
+            lastWriteLine = "startup wake " + WAKE_PRESET + " -> target " + pendingType
+                    + " -> read " + (actualType == null ? "read failed" : actualType)
+                    + " | STATE " + (state == null ? "read failed" : state);
             final boolean on = state != null && state == 1;
+            final boolean presetVerified = presetOk && actualType != null
+                    && actualType == pendingType;
             runOnUiThread(() -> {
                 syncToggle(on);
-                if (on) {
-                    setStatus(getString(R.string.sim_on, pendingType), R.color.success);
-                } else {
+                if (!on) {
                     setStatus(getString(R.string.sim_verify_failed), R.color.danger);
+                } else if (!presetVerified) {
+                    setStatus(getString(R.string.preset_rejected, pendingType,
+                            actualType == null ? 0 : actualType), R.color.warning);
+                    armAutoKeep();
+                } else {
+                    setStatus(getString(R.string.sim_on, pendingType), R.color.success);
+                    armAutoKeep();
                 }
             });
             refreshVehiclePanel();
         });
     }
 
+    /**
+     * Runs on the io thread. Writes {@code target} so it is actually audible, not
+     * just stored.
+     *
+     * Right after the enable sequence, the first SOURCE_TYPE_SET write is accepted
+     * and echoed back by the MCU but does not come out of the speaker -- confirmed
+     * on a Dolphin: picking preset 4 straight after turning the sound on saved 4 but
+     * stayed silent, and only played once the app had been pointed at another preset
+     * first. A longer settle alone was not enough; it took an actual value change.
+     * So this always starts on a preset confirmed to actually make sound, then
+     * switches to the real target after a real pause -- same as doing it by hand.
+     *
+     * Confirmed on this car: preset 1 writes and reads back fine but produces no
+     * sound by itself, so writing it does not wake anything -- it has to be a
+     * preset that genuinely plays, which here is {@link #WAKE_PRESET}. Starting
+     * there and then moving to the target is what worked by hand; no extra
+     * throwaway write of the target beforehand is needed.
+     *
+     * @return true only when the final target value is confirmed by MCU readback.
+     *         This confirms the register value, not audible playback.
+     */
+    private boolean primeAndApply(int target) {
+        int wake = (target == WAKE_PRESET) ? FALLBACK_WAKE_PRESET : WAKE_PRESET;
+
+        // The wake write must be sent successfully before the target write. A
+        // successful setInt call only means the HAL call did not throw; it does
+        // not prove that the MCU stored the value, so read it back after settling.
+        if (!setInt(FID_SRC_TYPE_SET, wake)) {
+            Log.e(TAG, "wake preset write failed: " + wake);
+            return false;
+        }
+        runOnUiThread(() -> setStatus(getString(R.string.sim_waking, wake), R.color.fg_secondary));
+        sleepMs(WARMUP_SETTLE_MS);
+
+        Integer wakeBack = getInt(FID_SRC_TYPE_GET);
+        if (wakeBack == null || wakeBack != wake) {
+            // Do not silently assume the priming write worked. Still send the
+            // requested target after the full warm-up delay: the target readback
+            // below decides whether the operation can be reported as successful.
+            Log.w(TAG, "wake preset readback mismatch: wanted=" + wake
+                    + " got=" + (wakeBack == null ? "null" : wakeBack));
+        }
+
+        if (!setInt(FID_SRC_TYPE_SET, target)) {
+            Log.e(TAG, "target preset write failed: " + target);
+            return false;
+        }
+        settle();
+        Integer targetBack = getInt(FID_SRC_TYPE_GET);
+        boolean verified = targetBack != null && targetBack == target;
+        if (!verified) {
+            Log.w(TAG, "target preset readback mismatch: wanted=" + target
+                    + " got=" + (targetBack == null ? "null" : targetBack));
+        }
+        return verified;
+    }
+
+    private static void sleepMs(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private void disableSim() {
         stopCycle();
+        audioWarmedUp = false;
+        prefs.edit().putBoolean(EngineConfig.KEY_AUTO, false).apply();
+        stopService(new Intent(this, AutoKeepService.class));
         io.post(() -> {
             setInt(FID_STATE_SET, 0);
             // The MCU does not answer instantly; without this the read was stale
@@ -371,6 +532,29 @@ public class MainActivity extends Activity {
             });
             refreshVehiclePanel();
         });
+    }
+
+    // ---------------------------------------------------------------- auto keep
+
+    /** Main thread: remember the choice and start the keeper that restores it after a restart. */
+    private void armAutoKeep() {
+        prefs.edit()
+                .putBoolean(EngineConfig.KEY_AUTO, true)
+                .putInt(EngineConfig.KEY_PRESET, pendingType)
+                .apply();
+        startForegroundService(new Intent(this, AutoKeepService.class));
+        if (AutoStart.shouldRemind(this, prefs)) {
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.autostart_title)
+                    .setMessage(R.string.autostart_msg)
+                    .setPositiveButton(R.string.autostart_open, (d, w) -> {
+                        if (AutoStart.open(this)) {
+                            AutoStart.markReminded(this, prefs);
+                        }
+                    })
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+        }
     }
 
     // ------------------------------------------------------------------ cycling
@@ -420,7 +604,8 @@ public class MainActivity extends Activity {
             });
             return;
         }
-        boolean ok = setInt(FID_SRC_TYPE_SET, t);
+        boolean ok = audioWarmedUp ? setInt(FID_SRC_TYPE_SET, t) : primeAndApply(t);
+        audioWarmedUp = true;
         settle();
         final Integer back = getInt(FID_SRC_TYPE_GET);
         if (!ok || back == null || back != t) {

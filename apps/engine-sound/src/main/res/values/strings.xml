@@ -21,6 +21,7 @@
 
     <string name="status_connecting">Connecting…</string>
     <string name="sim_on">Preset %1$d · sound ON</string>
+    <string name="sim_waking">Starting on preset %1$d to wake the sound…</string>
     <string name="sim_off">Preset %1$d · sound OFF</string>
     <string name="sim_turning_off">Sound OFF</string>
     <string name="sim_verify_failed">Vehicle did not confirm sound ON</string>
@@ -40,4 +41,10 @@
     <string name="sim_unsupported">Engine simulator not supported on this vehicle (%1$d)</string>
     <string name="sim_unreadable">Cannot read simulator capability from the vehicle</string>
     <string name="preset_note">The car accepts any preset number, but only some produce a different sound. Listen, then long-press to name the ones you can hear.</string>
+
+    <string name="keeper_channel">Engine sound keeper</string>
+    <string name="keeper_running">Keeping the engine sound on</string>
+    <string name="autostart_title">Allow auto-start</string>
+    <string name="autostart_msg">So the sound comes back by itself after the car restarts, find Engine Sound in the list and switch its row OFF (on this screen ON means blocked).</string>
+    <string name="autostart_open">Open settings</string>
 </resources>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="keeper_channel">Удержание звука двигателя</string>
+    <string name="keeper_running">Звук двигателя поддерживается</string>
+    <string name="autostart_title">Разрешите автозапуск</string>
+    <string name="autostart_msg">Чтобы звук включался сам после перезапуска машины, найдите Engine Sound в списке и переключите его строку в положение ВЫКЛ (на этом экране ВКЛ означает «запрещено»).</string>
+    <string name="autostart_open">Открыть настройки</string>
+    <string name="cancel">Отмена</string>
+    <string name="sim_waking">Начинаю с пресета %1$d, чтобы разбудить звук…</string>
+</resources>
